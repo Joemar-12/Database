@@ -3,10 +3,12 @@ import io  # Wrap raw bytes in a stream for StreamingResponse
 from datetime import datetime
 from typing import Optional
 
+import certifi  # Provides an up-to-date CA bundle (helps TLS in some serverless environments)
 from bson import ObjectId  # MongoDB's native id type
 from dotenv import load_dotenv  # Loads env vars from a .env file
 from fastapi import FastAPI, File, UploadFile, HTTPException  # FastAPI core + file upload primitives
-from fastapi.responses import StreamingResponse  # Streams bytes back to the client with a content-type
+from fastapi.responses import StreamingResponse, JSONResponse  # Streams bytes back; JSONResponse for custom error handling
+from pymongo.errors import ServerSelectionTimeoutError  # Raised when MongoDB can't be reached
 from pydantic import BaseModel, EmailStr, Field  # Request validation + schema generation
 import motor.motor_asyncio  # Async MongoDB driver (Motor)
 
@@ -17,6 +19,18 @@ load_dotenv(dotenv_path=_dotenv_path)
 
 # Create the FastAPI application (Swagger UI available at /docs)
 app = FastAPI(title="Event Management API")
+
+
+@app.exception_handler(ServerSelectionTimeoutError)
+async def mongo_unavailable_handler(request, exc):
+    # When Atlas cannot be reached (common on serverless if IPs aren't allowlisted or TLS fails),
+    # return a clean 503 instead of a long stack trace.
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": "Database unavailable (MongoDB connection failed). Check Atlas Network Access allowlist and MONGO_URI/MONGODB_URL.",
+        },
+    )
 
 # Connect to MongoDB Atlas
 # We support several env var names to avoid config issues from typos/variations.
@@ -33,8 +47,13 @@ if not mongo_uri:
         "Mongo connection string missing. Set MONGO_URI (recommended) or MONGODB_URL in your .env file."
     )
 
-# Create the MongoDB client (Motor is async, but the client object is created synchronously).
-client = motor.motor_asyncio.AsyncIOMotorClient(mongo_uri)
+# Create the MongoDB client.
+# In some serverless environments, explicitly providing a CA bundle helps prevent TLS handshake issues.
+client = motor.motor_asyncio.AsyncIOMotorClient(
+    mongo_uri,
+    tls=True,
+    tlsCAFile=certifi.where(),
+)
 
 # Reference the database that will store all API collections.
 db = client.event_management_db  # must match your Atlas database name
